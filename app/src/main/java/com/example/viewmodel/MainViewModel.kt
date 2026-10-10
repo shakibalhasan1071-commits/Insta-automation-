@@ -2962,7 +2962,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun reloadCookiesInstagram() {
-        engine.reload()
+        viewModelScope.launch {
+            stopAllAutomations()
+            val targetAcc = _selectedAccount.value ?: accounts.value.firstOrNull()
+            val mailDisplay = targetAcc?.email ?: ""
+            setProfileBanner(if (mailDisplay.isNotBlank()) "🔄 একই ইমেইল ($mailDisplay) নিয়ে পেজ রিলোড ও অটোমেশন শুরু হচ্ছে..." else "🔄 পেজ রিলোড ও অটোমেশন শুরু হচ্ছে...")
+            engine.reload()
+            delay(2500L)
+            startCookiesAutomationFlow()
+        }
     }
 
     fun isAnyAutomationRunning(): Boolean {
@@ -2978,13 +2986,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isTwoFaAutoRunning.value -> {
                 if (_twoFaSubMode.value == TwoFaSubMode.NO_MAIL) "2FA (No Mail)" else "2FA (Mail)"
             }
-            _isCookiesAutoRunning.value -> "Cookies Automation"
+            _isCookiesAutoRunning.value -> "Instagram Login Automation"
             _isMetaAuto1Running.value -> "Meta Auto 1 Flow"
             _isMetaAuto2Running.value -> "Meta Auto 2 Flow"
             _executionState.value.state == AutomationRunState.RUNNING -> "Instagram Flow"
             else -> when (_currentTab.value) {
                 MainTab.TWO_FA -> if (_twoFaSubMode.value == TwoFaSubMode.NO_MAIL) "2FA (No Mail)" else "2FA (Mail)"
-                MainTab.COOKIES -> "Cookies Automation"
+                MainTab.COOKIES -> "Instagram Login Automation"
                 MainTab.META -> "Meta Automation"
                 else -> "Instagram Flow"
             }
@@ -3050,6 +3058,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             when (_currentTab.value) {
                 MainTab.TWO_FA -> {
                     reloadTwoFaInstagram()
+                }
+                MainTab.COOKIES -> {
+                    reloadCookiesInstagram()
                 }
                 else -> {
                     startAutomation()
@@ -3161,84 +3172,168 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startCookiesAutomationFlow() {
         stopAllAutomations()
         _isCookiesAutoRunning.value = true
-        val currentAccs = accounts.value
-        val validAccount = _selectedAccount.value?.takeIf { acc -> 
-            !acc.isUsed && currentAccs.any { it.id == acc.id } 
-        } ?: currentAccs.firstOrNull { !it.isUsed } ?: currentAccs.firstOrNull()
-        if (validAccount != null) {
-            _selectedAccount.value = validAccount
-        }
-
-        val activeEmail = _selectedAccount.value?.email ?: "Instagram"
         _executionState.value = AutomationExecutionState(
             state = AutomationRunState.RUNNING,
             currentStepIndex = 1,
-            totalSteps = 1,
-            currentStepDescription = "Instagram অটোমেশন চলছে ($activeEmail)..."
+            totalSteps = 6,
+            currentStepDescription = "Instagram Smart Login Automation শুরু হচ্ছে..."
         )
-        setProfileBanner("⚡ Instagram লগইন অটোমেশন শুরু হচ্ছে: $activeEmail")
+        setProfileBanner("⚡ Instagram Smart Login Automation শুরু হচ্ছে...")
 
         cookiesAutoJob = viewModelScope.launch {
             try {
-                liveRawCookies.value = ""
-                // ONLY Instagram automation (2FA automation fully removed as requested!)
-                engine.loadUrl("https://www.instagram.com/?theme=dark")
-                delay(2000L)
-                startAutomation()
-
-                // Wait until IG automation completes all steps
-                var igWaitLoops = 0
-                var workflowCompletedSuccessfully = false
-                while (isActive && igWaitLoops < 180) {
-                    delay(2000L)
-                    igWaitLoops++
-                    val currentState = _executionState.value.state
-
-                    // If waiting for user to input username, stay patient!
-                    if (currentState == AutomationRunState.WAITING_FOR_USER) {
-                        continue
-                    }
-
-                    if (currentState == AutomationRunState.ERROR) {
-                        break
-                    }
-
-                    val snapshot = engine.getInternalSessionSnapshot()
-                    val hasSessionCookie = snapshot.contains("sessionid") || snapshot.contains("ds_user_id")
-                    if (hasSessionCookie) {
-                        liveRawCookies.value = snapshot
-                        saveCurrentSessionToProfile()
-                    }
-
-                    if (currentState == AutomationRunState.COMPLETED && hasSessionCookie) {
-                        workflowCompletedSuccessfully = true
-                        break
-                    }
-                }
-
-                if (workflowCompletedSuccessfully) {
-                    delay(1500L)
-                    val igSnap = engine.getInternalSessionSnapshot()
-                    liveRawCookies.value = igSnap
-                    saveCurrentSessionToProfile()
-                    
-                    _executionState.value = AutomationExecutionState(
-                        state = AutomationRunState.COMPLETED,
-                        currentStepIndex = 1,
-                        totalSteps = 1,
-                        currentStepDescription = "Instagram লগইন সম্পন্ন! Cookies প্রস্তুত।"
+                val currentAccs = accounts.value
+                val account = _selectedAccount.value ?: currentAccs.firstOrNull()
+                if (account == null) {
+                    setProfileBanner("Email manager এ কোনো অ্যাকাউন্ট নেই! অনুগ্রহ করে ইমেইল যোগ করুন।")
+                    _executionState.value = _executionState.value.copy(
+                        state = AutomationRunState.PAUSED,
+                        currentStepDescription = "ইমেইল নির্বাচন করুন"
                     )
-                    setProfileBanner("✓ Instagram লগইন সম্পন্ন! Cookies কপি করার অপশন ওপেন হয়েছে।")
-                    
-                    // Show cookies copy dialog at the end only when genuinely completed!
-                    onCookieButtonClicked()
+                    _isCookiesAutoRunning.value = false
+                    _showEmailManagerDialog.value = true
+                    return@launch
                 }
+                val email = account.email
+                val sharedPassword = repository.getSharedPassword()
+                val fallbackPassword = com.example.data.repository.AutomationRepository.DEFAULT_PRELOADED_PASSWORD.ifBlank { "403588" }
+                val password = account.password.ifBlank { sharedPassword.ifBlank { fallbackPassword } }
+
+                // 1. Initial Page Load if needed
+                val currentUrl = browserUrl.value
+                val hasCookies = engine.getGenericSessionSnapshot("https://www.instagram.com").let { it.contains("sessionid") || it.contains("ds_user_id") }
+                if (!hasCookies && (currentUrl.isBlank() || currentUrl == "about:blank" || currentUrl == "https://www.instagram.com/" || currentUrl.startsWith("https://www.instagram.com/?") || (!currentUrl.contains("instagram.com") && !currentUrl.contains("facebook.com")))) {
+                    setProfileBanner("⚡ ১/৬: ইনস্টাগ্রাম লগইন পেজ লোড করা হচ্ছে...")
+                    engine.loadUrl("https://www.instagram.com/accounts/login/")
+                    delay(3500L)
+                }
+
+                var tickCount = 0
+                while (coroutineContext.isActive && _isCookiesAutoRunning.value && tickCount < 120) {
+                    tickCount++
+                    delay(1200L)
+
+                    val deferred = CompletableDeferred<org.json.JSONObject>()
+                    engine.injectInstagramSmartLoginTick(email, password) { res ->
+                        deferred.complete(res)
+                    }
+                    val result = try {
+                        kotlinx.coroutines.withTimeoutOrNull(2500L) { deferred.await() } ?: org.json.JSONObject()
+                    } catch (e: Exception) { org.json.JSONObject() }
+
+                    val state = result.optString("state", "")
+                    val message = result.optString("message", "")
+
+                    when (state) {
+                        "TYPED_USERNAME" -> {
+                            _executionState.value = _executionState.value.copy(
+                                currentStepIndex = 2,
+                                totalSteps = 6,
+                                currentStepDescription = "২/৬: ইমেইল/ইউজারনেম টাইপ করা হচ্ছে ($email)..."
+                            )
+                            setProfileBanner("⚡ ২/৬: ইমেইল ফিল করা হয়েছে: $email")
+                        }
+                        "TYPED_PASSWORD" -> {
+                            _executionState.value = _executionState.value.copy(
+                                currentStepIndex = 3,
+                                totalSteps = 6,
+                                currentStepDescription = "৩/৬: পাসওয়ার্ড টাইপ করা হচ্ছে..."
+                            )
+                            setProfileBanner("⚡ ৩/৬: পাসওয়ার্ড ফিল করা হয়েছে...")
+                        }
+                        "CLICKED_NEXT_STEP" -> {
+                            _executionState.value = _executionState.value.copy(
+                                currentStepIndex = 3,
+                                totalSteps = 6,
+                                currentStepDescription = "৩/৬: নেক্সট বাটনে ক্লিক করা হয়েছে..."
+                            )
+                            setProfileBanner("⚡ ৩/৬: নেক্সট বাটনে ক্লিক করা হয়েছে, পাসওয়ার্ড স্ক্রিনে যাওয়া হচ্ছে...")
+                        }
+                        "CLICKED_LOGIN_SUBMIT" -> {
+                            _executionState.value = _executionState.value.copy(
+                                currentStepIndex = 4,
+                                totalSteps = 6,
+                                currentStepDescription = "৪/৬: লগইন বাটনে ক্লিক করা হয়েছে, পেজ রেসপন্স অপেক্ষা করছে..."
+                            )
+                            setProfileBanner("⚡ ৪/৬: লগইন সাবমিট করা হয়েছে!")
+                        }
+                        "TYPED_FULL_NAME_AND_NEXT" -> {
+                            setProfileBanner("⚡ ফুল নেম অটো-জেনারেট ও নেক্সট ক্লিক করা হয়েছে...")
+                        }
+                        "CLICKED_SUGGESTED_USERNAME_NEXT" -> {
+                            setProfileBanner("⚡ ইনস্টাগ্রাম অফিশিয়াল সাজেস্টেড ইউজারনেম অটো-নেক্সট করা হয়েছে...")
+                        }
+                        "CLICKED_ALLOW_CONTINUE" -> {
+                            _executionState.value = _executionState.value.copy(
+                                currentStepIndex = 5,
+                                totalSteps = 6,
+                                currentStepDescription = "৫/৬: 'Allow and Continue' / 'Agree and Continue' কনফার্ম করা হয়েছে..."
+                            )
+                            setProfileBanner("⚡ ৫/৬: 'Allow and Continue' / 'Agree and Continue' ক্লিক সম্পন্ন!")
+                        }
+                        "CLICKED_I_AGREE" -> {
+                            setProfileBanner("⚡ 'I agree' বাটনে ক্লিক করা হয়েছে...")
+                        }
+                        "CHECKPOINT_DETECTED" -> {
+                            _executionState.value = _executionState.value.copy(
+                                state = AutomationRunState.WAITING_FOR_USER,
+                                currentStepDescription = "2FA বা সিকিউরিটি চেকপয়েন্ট ভেরিফিকেশন প্রয়োজন"
+                            )
+                            setProfileBanner("⚠️ Instagram 2FA বা সিকিউরিটি চেকপয়েন্ট ডিটেক্ট হয়েছে!")
+                            return@launch
+                        }
+                        "SUCCESS_LOGGED_IN" -> {
+                            setProfileBanner("✓ লগইন সফল হয়েছে! সেশন ও কুকিজ সেভ করা হচ্ছে...")
+                            delay(2500L)
+                            saveCurrentSessionToProfile()
+                            repository.markAccountUsed(account.id, true)
+                            _executionState.value = _executionState.value.copy(
+                                state = AutomationRunState.COMPLETED,
+                                currentStepIndex = 6,
+                                totalSteps = 6,
+                                currentStepDescription = "ইনস্টাগ্রাম লগইন অটোমেশন সফলভাবে সম্পন্ন হয়েছে!"
+                            )
+                            setProfileBanner("✓ ইনস্টাগ্রাম লগইন অটোমেশন সফল হয়েছে & কুকিজ সেভ হয়েছে!")
+                            return@launch
+                        }
+                        else -> {
+                            if (message.isNotBlank() && tickCount % 3 == 0) {
+                                setProfileBanner("⚡ $message")
+                            }
+                        }
+                    }
+
+                    // Check if raw cookies now contain sessionid
+                    val snapshot = engine.getGenericSessionSnapshot("https://www.instagram.com")
+                    if (snapshot.contains("sessionid") || snapshot.contains("ds_user_id")) {
+                        setProfileBanner("✓ Session Cookies ডিটেক্ট হয়েছে! সেশন সংরক্ষণ করা হচ্ছে...")
+                        delay(2000L)
+                        saveCurrentSessionToProfile()
+                        repository.markAccountUsed(account.id, true)
+                        _executionState.value = _executionState.value.copy(
+                            state = AutomationRunState.COMPLETED,
+                            currentStepIndex = 6,
+                            totalSteps = 6,
+                            currentStepDescription = "ইনস্টাগ্রাম লগইন অটোমেশন সফলভাবে সম্পন্ন হয়েছে!"
+                        )
+                        setProfileBanner("✓ ইনস্টাগ্রাম লগইন অটোমেশন সফল হয়েছে & কুকিজ সেভ হয়েছে!")
+                        return@launch
+                    }
+                }
+
+                // If loop finished after 120 ticks
+                saveCurrentSessionToProfile()
+                _executionState.value = _executionState.value.copy(
+                    state = AutomationRunState.COMPLETED,
+                    currentStepDescription = "অটোমেশন রান সম্পন্ন হয়েছে"
+                )
+                setProfileBanner("✓ অটোমেশন সাইকেল সম্পন্ন হয়েছে")
             } catch (e: Exception) {
                 _executionState.value = _executionState.value.copy(
                     state = AutomationRunState.ERROR,
                     errorMessage = e.message
                 )
-                setProfileBanner("✕ Instagram অটোমেশন ত্রুটি: ${e.message}")
+                setProfileBanner("✕ অটোমেশনে ত্রুটি: ${e.message}")
             } finally {
                 _isCookiesAutoRunning.value = false
             }

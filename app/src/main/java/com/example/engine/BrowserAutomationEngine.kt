@@ -3363,6 +3363,294 @@ class BrowserAutomationEngine(
         }
     }
 
+    fun injectInstagramSmartLoginTick(email: String, password: String, callback: (JSONObject) -> Unit) {
+        val escapedEmail = JSONObject.quote(email.trim())
+        val escapedPass = JSONObject.quote(password.trim())
+        val script = """
+            (function() {
+                $jsClickHelpers
+                var emailVal = $escapedEmail;
+                var passVal = $escapedPass;
+                var bodyText = (document.body ? document.body.innerText : "") || "";
+                var lowerBody = bodyText.toLowerCase();
+                var currentUrl = window.location.href || "";
+
+                function cleanClick(el) {
+                    if (!el) return false;
+                    var target = el.closest('button, [role="button"], a, input[type="submit"]') || el;
+                    try { target.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch(e){}
+                    try { target.focus(); } catch(e){}
+                    try {
+                        if (target.disabled) {
+                            target.disabled = false;
+                            target.removeAttribute('disabled');
+                            target.classList.remove('disabled');
+                        }
+                        target.setAttribute('aria-disabled', 'false');
+                    } catch(e) {}
+                    var rect = target.getBoundingClientRect();
+                    var cx = rect.left + rect.width / 2;
+                    var cy = rect.top + rect.height / 2;
+                    try {
+                        if (typeof showVisualClickIndicator === 'function') {
+                            showVisualClickIndicator(cx, cy);
+                        }
+                    } catch(e){}
+                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(type) {
+                        try {
+                            var evt;
+                            if (type.startsWith('pointer') && typeof PointerEvent === 'function') {
+                                evt = new PointerEvent(type, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, isPrimary: true });
+                            } else {
+                                evt = new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy });
+                            }
+                            target.dispatchEvent(evt);
+                        } catch(e){}
+                    });
+                    try { target.click(); } catch(e){}
+                    try {
+                        var form = target.closest('form') || document.querySelector('form');
+                        if (form && typeof form.requestSubmit === 'function') {
+                            form.requestSubmit(target);
+                        }
+                    } catch(e) {}
+                    return true;
+                }
+
+                function typeValue(input, val) {
+                    if (!input || !val) return false;
+                    try { input.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch(e){}
+                    try { input.focus(); } catch(e){}
+
+                    var lastValue = input.value;
+                    try { input.value = ''; } catch(e) {}
+                    if (input._valueTracker) {
+                        try { input._valueTracker.setValue(lastValue); } catch(e) {}
+                    }
+
+                    var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') ?
+                        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set : null;
+                    if (nativeSetter) {
+                        try { nativeSetter.call(input, val); } catch(e) { input.value = val; }
+                    } else {
+                        input.value = val;
+                    }
+
+                    try { input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true, composed: true })); } catch(e){}
+                    try { input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: val })); } catch(e){}
+
+                    try {
+                        if (input.select) input.select();
+                        document.execCommand('insertText', false, val);
+                    } catch(e) {}
+
+                    try { input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch(e){}
+                    try { input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: val.slice(-1) || '1' })); } catch(e){}
+                    try { input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: val.slice(-1) || '1' })); } catch(e){}
+                    return true;
+                }
+
+                // 1. Checkpoint / 2FA check
+                if (currentUrl.includes("/two_factor") || currentUrl.includes("/checkpoint/") || currentUrl.includes("/challenge/")) {
+                    return JSON.stringify({ state: "CHECKPOINT_DETECTED", message: "Instagram 2FA বা ভেরিফিকেশন পেজ ডিটেক্ট হয়েছে" });
+                }
+
+                // 2. Success check: Home Feed / Direct / Feed / Save login info
+                var isHomeOrFeed = document.querySelector("svg[aria-label='Home'], svg[aria-label='Direct'], [aria-label='Feed'], svg[aria-label='Search'], a[href*='/direct/']") !== null;
+                if (isHomeOrFeed || lowerBody.includes("save your login info") || lowerBody.includes("save login info")) {
+                    var saveBtns = Array.from(document.querySelectorAll("button, div[role='button']"));
+                    var saveBtn = saveBtns.find(function(b) {
+                        var t = (b.innerText || '').toLowerCase();
+                        return t === "save info" || t === "save login info" || t === "not now" || t.includes("save info") || t.includes("not now");
+                    });
+                    if (saveBtn) cleanClick(saveBtn);
+                    return JSON.stringify({ state: "SUCCESS_LOGGED_IN", message: "ইনস্টাগ্রাম লগইন সম্পন্ন ও ফিড লোড হয়েছে!" });
+                }
+
+                // 3. "Allow and Continue" / "Agree and Continue" button click
+                var allowBtns = Array.from(document.querySelectorAll("button, [role='button'], [type='submit'], div, span, a"));
+                var targetAllow = allowBtns.find(function(b) {
+                    var txt = (b.innerText || b.textContent || b.getAttribute('aria-label') || "").trim().toLowerCase();
+                    return (txt.includes("allow") && txt.includes("continue")) ||
+                           (txt.includes("agree") && txt.includes("continue")) ||
+                           (txt.includes("allow") && txt.includes("agree")) ||
+                           txt === "allow and continue" || txt === "agree and continue" || txt === "allow and agree";
+                });
+                if (targetAllow) {
+                    cleanClick(targetAllow);
+                    return JSON.stringify({ state: "CLICKED_ALLOW_CONTINUE", message: "'Allow and Continue' / 'Agree and Continue' বাটনে ক্লিক করা হয়েছে" });
+                }
+
+                // 4. "I agree" / Terms Confirmation
+                if (lowerBody.includes("i agree") || lowerBody.includes("agree to instagram's terms")) {
+                    var agreeBtns = Array.from(document.querySelectorAll("button, [role='button'], [type='submit']"));
+                    var agreeBtn = agreeBtns.find(function(b) {
+                        var t = (b.innerText || '').toLowerCase();
+                        return t === "i agree" || t.includes("i agree") || t === "agree";
+                    });
+                    if (agreeBtn) {
+                        cleanClick(agreeBtn);
+                        return JSON.stringify({ state: "CLICKED_I_AGREE", message: "'I agree' বাটনে ক্লিক করা হয়েছে" });
+                    }
+                }
+
+                // 5. Official Suggested Username Screen (Signup only): Auto-Next!
+                var isExplicitUsernameScreen = lowerBody.includes("create a username") || lowerBody.includes("suggested username") || lowerBody.includes("choose a username") || lowerBody.includes("pick a username");
+                if (isExplicitUsernameScreen) {
+                    var nextBtns = Array.from(document.querySelectorAll("button, [role='button'], input[type='submit'], div, span"));
+                    var nextBtn = nextBtns.find(function(b) {
+                        var t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        return t === "next" || t === "continue" || t === "পরবর্তী" || (t.includes("next") && !t.includes("what"));
+                    });
+                    if (nextBtn) {
+                        cleanClick(nextBtn);
+                        return JSON.stringify({ state: "CLICKED_SUGGESTED_USERNAME_NEXT", message: "অফিশিয়াল সাজেস্টেড ইউজারনেম অটো-নেক্সট করা হয়েছে" });
+                    }
+                }
+
+                // 6. Full Name Screen: Auto-generate & type, then Next
+                if (lowerBody.includes("what's your name") || lowerBody.includes("full name") || lowerBody.includes("add your name")) {
+                    var nameInput = document.querySelector("input[name='fullName'], input[name='name'], input[placeholder*='name' i], input[aria-label*='name' i], input[type='text']");
+                    if (nameInput) {
+                        var currVal = (nameInput.value || "").trim();
+                        if (currVal.length === 0) {
+                            var firstNames = ["Liam", "Noah", "Oliver", "James", "Elijah", "William", "Henry", "Lucas", "Emma", "Olivia", "Ava", "Sophia", "Isabella", "Mia"];
+                            var lastNames = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Wilson", "Taylor"];
+                            var randName = firstNames[Math.floor(Math.random() * firstNames.length)] + " " + lastNames[Math.floor(Math.random() * lastNames.length)];
+                            typeValue(nameInput, randName);
+                        }
+                        var fNextBtns = Array.from(document.querySelectorAll("button, [role='button'], input[type='submit']"));
+                        var fNextBtn = fNextBtns.find(function(b) {
+                            var t = (b.innerText || '').trim().toLowerCase();
+                            return t === "next" || t === "continue" || t.includes("next");
+                        });
+                        if (fNextBtn) {
+                            cleanClick(fNextBtn);
+                            return JSON.stringify({ state: "TYPED_FULL_NAME_AND_NEXT", message: "ফুল নেম অটো জেনারেট ও টাইপ করে নেক্সট ক্লিক করা হয়েছে" });
+                        }
+                    }
+                }
+
+                // 7. Login Form: Find Username & Password inputs
+                var allInputs = Array.from(document.querySelectorAll("input, textarea"));
+                var userInput = allInputs.find(function(i) {
+                    var n = (i.name || '').toLowerCase();
+                    var t = (i.type || '').toLowerCase();
+                    var ac = (i.getAttribute('autocomplete') || '').toLowerCase();
+                    var al = (i.getAttribute('aria-label') || '').toLowerCase();
+                    var p = (i.placeholder || '').toLowerCase();
+                    if (t === 'password' || t === 'hidden' || t === 'submit' || t === 'checkbox' || t === 'radio') return false;
+                    if (p.includes('search') || al.includes('search')) return false;
+                    return n === 'username' || n === 'email' || n === 'contact_point' ||
+                           ac === 'username' || ac === 'email' ||
+                           al.includes('username') || al.includes('email') || al.includes('phone') || al.includes('ইমেল') || al.includes('ব্যবহারকারী') ||
+                           p.includes('username') || p.includes('email') || p.includes('phone') || p.includes('ইমেল') || p.includes('ব্যবহারকারী') ||
+                           p.includes('phone number') || al.includes('phone number') ||
+                           (t === 'text' && !i.hidden);
+                });
+
+                var passInput = allInputs.find(function(i) {
+                    var t = (i.type || '').toLowerCase();
+                    var n = (i.name || '').toLowerCase();
+                    var ac = (i.getAttribute('autocomplete') || '').toLowerCase();
+                    var al = (i.getAttribute('aria-label') || '').toLowerCase();
+                    var p = (i.placeholder || '').toLowerCase();
+                    return t === 'password' || n === 'password' || n === 'enc_password' ||
+                           ac.includes('password') || al.includes('password') || al.includes('পাসওয়ার্ড') ||
+                           p.includes('password') || p.includes('পাসওয়ার্ড');
+                });
+
+                function findSubmitOrNextButton() {
+                    var allClickable = Array.from(document.querySelectorAll("button, [role='button'], input[type='submit'], [type='submit']"));
+                    var targetBtn = allClickable.find(function(b) {
+                        var txt = (b.innerText || b.textContent || b.getAttribute('value') || b.getAttribute('aria-label') || "").trim().toLowerCase();
+                        var type = (b.getAttribute('type') || '').toLowerCase();
+                        if (type === 'submit') return true;
+                        return txt === 'next' || txt === 'continue' || txt === 'পরবর্তী' || txt === 'নেক্সট' ||
+                               txt === 'log in' || txt === 'login' || txt === 'লগ ইন' || txt === 'লগ ইন করুন' ||
+                               (txt.includes('next') && !txt.includes('what')) ||
+                               (txt.includes('continue') && !txt.includes('help')) ||
+                               (txt.includes('log in') && !txt.includes('log in or sign up') && !txt.includes('open instagram'));
+                    });
+                    if (!targetBtn) {
+                        targetBtn = document.querySelector("button[type='submit'], input[type='submit']");
+                    }
+                    return targetBtn;
+                }
+
+                if (userInput || passInput) {
+                    var userVal = userInput ? (userInput.value || "").trim() : "";
+                    var passValActual = passInput ? (passInput.value || "").trim() : "";
+
+                    // A. Fill Username if present and empty/mismatched
+                    if (userInput && userVal !== emailVal.trim()) {
+                        typeValue(userInput, emailVal);
+                        return JSON.stringify({ state: "TYPED_USERNAME", message: "ইমেইল/ইউজারনেম ফিল করা হয়েছে (" + emailVal + ")" });
+                    }
+
+                    // B. Fill Password if present and empty/mismatched
+                    if (passInput && passValActual !== passVal.trim()) {
+                        typeValue(passInput, passVal);
+                        return JSON.stringify({ state: "TYPED_PASSWORD", message: "পাসওয়ার্ড ফিল করা হয়েছে" });
+                    }
+
+                    // C. Username is filled, but Password input is not on screen yet (Step 1 -> Click Next!)
+                    if (userInput && (!passInput || passInput.hidden || passInput.offsetParent === null)) {
+                        var nextBtn = findSubmitOrNextButton();
+                        if (nextBtn) {
+                            cleanClick(nextBtn);
+                            return JSON.stringify({ state: "CLICKED_NEXT_STEP", message: "নেক্সট বাটনে ক্লিক করা হয়েছে..." });
+                        }
+                    }
+
+                    // D. Password is filled (or both filled) -> Click Log In / Submit!
+                    if (passInput && passValActual.length > 0) {
+                        var submitBtn = findSubmitOrNextButton();
+                        if (submitBtn) {
+                            cleanClick(submitBtn);
+                            return JSON.stringify({ state: "CLICKED_LOGIN_SUBMIT", message: "লগইন বাটনে ক্লিক করা হয়েছে!" });
+                        }
+                    }
+
+                    return JSON.stringify({ state: "CREDENTIALS_READY", message: "ক্রেডেনশিয়ালস রেডি, সাবমিট বাটন অপেক্ষা করছে..." });
+                }
+
+                // 8. Landing Page check: If landing button / link exists
+                var allClickables = Array.from(document.querySelectorAll("a, button, div[role='button'], span"));
+                var loginLink = allClickables.find(function(item) {
+                    var t = (item.innerText || item.textContent || "").trim().toLowerCase();
+                    var href = (item.getAttribute && item.getAttribute("href")) || "";
+                    return t.includes("log in or sign up") || 
+                           t === "log in" || t === "login" || t === "লগ ইন" || t === "লগ ইন করুন" ||
+                           (t.includes("log in") && !t.includes("open instagram")) || 
+                           href.indexOf("/accounts/login") !== -1;
+                });
+                if (loginLink) {
+                    cleanClick(loginLink);
+                    return JSON.stringify({ state: "CLICKED_LANDING", message: "'Log in' লিংকে ক্লিক করা হয়েছে" });
+                }
+
+                // Fallback: If on instagram.com root and not on login page, direct navigate
+                if (currentUrl === "https://www.instagram.com/" || currentUrl.startsWith("https://www.instagram.com/?")) {
+                    window.location.href = "https://www.instagram.com/accounts/login/";
+                    return JSON.stringify({ state: "REDIRECTING_LOGIN", message: "লগইন পেজে রিডাইরেক্ট করা হচ্ছে..." });
+                }
+
+                return JSON.stringify({ state: "WAITING_PAGE", message: "ইনস্টাগ্রাম পেজ লোড হচ্ছে..." });
+            })();
+        """.trimIndent()
+
+        evaluateJsWithCallback(script) { res ->
+            try {
+                val clean = res.trim().removeSurrounding("\"").replace("\\\"", "\"").replace("\\\\", "\\")
+                val json = if (clean.startsWith("{") && clean.endsWith("}")) JSONObject(clean) else JSONObject().put("state", "RAW").put("val", clean)
+                callback(json)
+            } catch (e: Exception) {
+                callback(JSONObject().put("state", "ERROR").put("error", e.message))
+            }
+        }
+    }
+
     fun injectTwoFaAutomationTick(callback: (JSONObject) -> Unit) {
         val script = """
             (async function() {
@@ -3904,11 +4192,15 @@ class BrowserAutomationEngine(
                         """ else ""}
 
                         ${if (isLoginSubmit) """
-                        var allSubmitBtns = Array.from(document.querySelectorAll("button, [type='submit'], div[role='button'], a"));
+                        var allSubmitBtns = Array.from(document.querySelectorAll("button, [type='submit'], div[role='button'], a, input[type='submit']"));
                         el = allSubmitBtns.find(function(b) {
-                            var txt = (b.innerText || b.textContent || "").trim().toLowerCase();
+                            var txt = (b.innerText || b.textContent || b.getAttribute('value') || "").trim().toLowerCase();
                             var type = (b.getAttribute('type') || '').toLowerCase();
-                            return type === 'submit' || txt === 'log in' || txt === 'login' || (txt.includes('log in') && !txt.includes('log in or sign up'));
+                            return type === 'submit' || 
+                                   txt === 'log in' || txt === 'login' || txt === 'লগ ইন' || txt === 'লগ ইন করুন' ||
+                                   txt === 'next' || txt === 'continue' || txt === 'পরবর্তী' || txt === 'নেক্সট' ||
+                                   (txt.includes('next') && !txt.includes('what')) ||
+                                   (txt.includes('log in') && !txt.includes('log in or sign up'));
                         });
 
                         if (el) {
@@ -4483,9 +4775,10 @@ class BrowserAutomationEngine(
                             } catch(e) {}
 
                             // Dispatch React events
-                            el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: valToType }));
-                            el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: valToType }));
-                            el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                            try { el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true, composed: true })); } catch(e){}
+                            try { el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: valToType })); } catch(e){}
+                            try { el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: valToType })); } catch(e){}
+                            try { el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch(e){}
                             el.dispatchEvent(new Event('blur', { bubbles: true }));
 
                             return JSON.stringify({ success: true, message: "Filled value into " + (el.name || el.type || el.tagName) });

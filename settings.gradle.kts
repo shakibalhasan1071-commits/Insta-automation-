@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Automation"
+rootProject.name = "Muse Browser Automation"
 include(":app")
